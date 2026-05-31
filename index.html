@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dark Water</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;overflow:hidden;background:#04111e;cursor:none}
+  #bubble-canvas{position:fixed;top:0;left:0;pointer-events:none;z-index:2}
+</style>
+</head>
+<body>
+<canvas id="bubble-canvas"></canvas>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const W=window.innerWidth, H=window.innerHeight;
+
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.setSize(W,H);
+renderer.toneMapping=THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure=0.78;
+document.body.prepend(renderer.domElement);
+renderer.domElement.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;';
+
+const scene=new THREE.Scene();
+/* ── time-of-day sky ─────────────────────────────────
+   Reads system clock hour (0-24) and maps to:
+   0-4   night       deep navy, stars
+   4-6   pre-dawn    dark purple → indigo
+   6-7   sunrise     orange/pink/gold horizon
+   7-10  morning     warm light blue
+   10-16 midday      bright blue
+   16-18 afternoon   golden blue
+   18-20 sunset      orange/pink/purple
+   20-22 dusk        purple/deep blue
+   22-24 night       deep navy
+─────────────────────────────────────────────────── */
+const now    = new Date();
+const hour   = now.getHours() + now.getMinutes()/60; // 0..24
+
+/* smooth 0..1 transitions between key times */
+function timeFade(from, to, h) {
+  if (to > from) return Math.max(0, Math.min(1, (h-from)/(to-from)));
+  return 1 - Math.max(0, Math.min(1, (h-to)/(from-to)));
+}
+
+/* sky gradient colour palette per time */
+function skyPalette(h) {
+  // returns { zenith, horizon, fogC, sunDir, sunCol, sunIntensity, fillCol, fillIntensity, starAlpha }
+  const p = {
+    zenith:       new THREE.Color(),
+    horizon:      new THREE.Color(),
+    fogC:         new THREE.Color(),
+    sunDir:       new THREE.Vector3(),
+    sunCol:       new THREE.Color(),
+    sunIntensity: 1.0,
+    fillCol:      new THREE.Color(),
+    fillIntensity:1.0,
+    starAlpha:    0.0,
+    moonAlpha:    0.0,
+  };
+
+  if (h >= 22 || h < 4) {
+    // night
+    const t2 = h >= 22 ? (h-22)/2 : (h+2)/4;
+    p.zenith.setRGB(0.010, 0.015, 0.042);
+    p.horizon.setRGB(0.018, 0.028, 0.065);
+    p.fogC.setRGB(0.012, 0.018, 0.048);
+    p.sunDir.set(-0.2, 0.3, 0.9).normalize();
+    p.sunCol.setRGB(0.7, 0.8, 1.0);
+    p.sunIntensity = 0.3;
+    p.fillCol.setRGB(0.3, 0.4, 0.7);
+    p.fillIntensity = 0.4;
+    p.starAlpha = 0.9;
+    p.moonAlpha = 0.7;
+  } else if (h < 6) {
+    // pre-dawn 4-6
+    const t2 = (h-4)/2;
+    p.zenith.setRGB(0.018+t2*0.015, 0.010+t2*0.020, 0.068+t2*0.020);
+    p.horizon.setRGB(0.05+t2*0.18, 0.02+t2*0.08, 0.10+t2*0.05);
+    p.fogC.setRGB(0.025+t2*0.05, 0.015+t2*0.03, 0.075+t2*0.01);
+    p.sunDir.set(-0.6+t2*0.5, 0.1+t2*0.2, 0.8-t2*0.2).normalize();
+    p.sunCol.setRGB(1.0, 0.55+t2*0.25, 0.3+t2*0.3);
+    p.sunIntensity = 0.4 + t2*1.2;
+    p.fillCol.setRGB(0.4+t2*0.2, 0.3+t2*0.2, 0.8-t2*0.1);
+    p.fillIntensity = 0.5 + t2*0.5;
+    p.starAlpha = 0.9 - t2*0.8;
+    p.moonAlpha = 0.7 - t2*0.6;
+  } else if (h < 7) {
+    // sunrise 6-7
+    const t2 = h-6;
+    p.zenith.setRGB(0.12+t2*0.22, 0.18+t2*0.28, 0.42+t2*0.18);
+    p.horizon.setRGB(0.95, 0.45+t2*0.20, 0.10+t2*0.10);
+    p.fogC.setRGB(0.35+t2*0.10, 0.18+t2*0.10, 0.10+t2*0.05);
+    p.sunDir.set(-0.1+t2*0.3, 0.18+t2*0.32, 0.6-t2*0.1).normalize();
+    p.sunCol.setRGB(1.0, 0.75+t2*0.15, 0.35+t2*0.35);
+    p.sunIntensity = 1.8 + t2*1.8;
+    p.fillCol.setRGB(0.9, 0.55+t2*0.20, 0.55);
+    p.fillIntensity = 1.0 + t2*0.5;
+    p.starAlpha = 0.05 - t2*0.05;
+  } else if (h < 10) {
+    // morning 7-10
+    const t2 = (h-7)/3;
+    p.zenith.setRGB(0.28+t2*0.15, 0.40+t2*0.12, 0.65+t2*0.05);
+    p.horizon.setRGB(0.62-t2*0.05, 0.72+t2*0.03, 0.85);
+    p.fogC.setRGB(0.55+t2*0.06, 0.62+t2*0.07, 0.75+t2*0.04);
+    p.sunDir.set(0.2+t2*0.1, 0.5+t2*0.4, 0.5-t2*0.2).normalize();
+    p.sunCol.setRGB(1.0, 0.92+t2*0.06, 0.72+t2*0.20);
+    p.sunIntensity = 3.2 + t2*1.0;
+    p.fillCol.setRGB(0.6, 0.78, 1.0);
+    p.fillIntensity = 1.0 + t2*0.3;
+  } else if (h < 16) {
+    // midday 10-16 — Nordic overcast
+    const t2 = (h-10)/6;
+    p.zenith.setRGB(0.38, 0.50, 0.68);
+    p.horizon.setRGB(0.68, 0.75, 0.85);
+    p.fogC.setRGB(0.60, 0.68, 0.78);
+    p.sunDir.set(0.0+t2*0.2, 0.95-t2*0.15, 0.0+t2*0.1).normalize();
+    p.sunCol.setRGB(1.0, 0.97, 0.92);
+    p.sunIntensity = 5.5;
+    p.fillCol.setRGB(0.55, 0.80, 1.00);
+    p.fillIntensity = 1.2;
+  } else if (h < 18) {
+    // afternoon 16-18
+    const t2 = (h-16)/2;
+    p.zenith.setRGB(0.18-t2*0.05, 0.42-t2*0.08, 0.82-t2*0.12);
+    p.horizon.setRGB(0.60+t2*0.30, 0.78-t2*0.10, 0.96-t2*0.30);
+    p.fogC.setRGB(0.50+t2*0.20, 0.65-t2*0.05, 0.85-t2*0.20);
+    p.sunDir.set(0.2+t2*0.5, 0.80-t2*0.50, 0.1-t2*0.4).normalize();
+    p.sunCol.setRGB(1.0, 0.85+t2*0.05, 0.55-t2*0.15);
+    p.sunIntensity = 5.5 - t2*2.0;
+    p.fillCol.setRGB(0.7+t2*0.2, 0.65+t2*0.10, 0.90-t2*0.20);
+    p.fillIntensity = 1.2;
+  } else if (h < 20) {
+    // sunset 18-20
+    const t2 = (h-18)/2;
+    p.zenith.setRGB(0.08+t2*0.02, 0.10+t2*0.02, 0.28+t2*0.10);
+    p.horizon.setRGB(0.95-t2*0.30, 0.38-t2*0.18, 0.05+t2*0.05);
+    p.fogC.setRGB(0.40-t2*0.15, 0.22-t2*0.08, 0.18+t2*0.04);
+    p.sunDir.set(0.7+t2*0.2, 0.30-t2*0.22, -0.30-t2*0.20).normalize();
+    p.sunCol.setRGB(1.0, 0.52-t2*0.10, 0.15-t2*0.05);
+    p.sunIntensity = 3.5 - t2*2.2;
+    p.fillCol.setRGB(0.9-t2*0.3, 0.4-t2*0.1, 0.7+t2*0.2);
+    p.fillIntensity = 1.0 - t2*0.3;
+    p.starAlpha = t2*0.4;
+  } else {
+    // dusk 20-22
+    const t2 = (h-20)/2;
+    p.zenith.setRGB(0.022+t2*0.012, 0.022+t2*0.010, 0.075+t2*0.025);
+    p.horizon.setRGB(0.10-t2*0.06, 0.06-t2*0.03, 0.18+t2*0.02);
+    p.fogC.setRGB(0.025+t2*0.005, 0.022+t2*0.004, 0.070+t2*0.010);
+    p.sunDir.set(0.9+t2*0.1, 0.08-t2*0.05, -0.5-t2*0.2).normalize();
+    p.sunCol.setRGB(0.8, 0.65, 0.9);
+    p.sunIntensity = 1.3 - t2*1.0;
+    p.fillCol.setRGB(0.4+t2*0.1, 0.3+t2*0.1, 0.7+t2*0.2);
+    p.fillIntensity = 0.7 - t2*0.3;
+    p.starAlpha = 0.4 + t2*0.5;
+    p.moonAlpha = t2*0.5;
+  }
+  return p;
+}
+
+const SKY = skyPalette(hour);
+
+/* sky mesh — large hemisphere visible behind water */
+const skyGeo = new THREE.SphereGeometry(1200, 24, 12, 0, Math.PI*2, 0, Math.PI/2);
+const skyMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uZenith:  { value: SKY.zenith  },
+    uHorizon: { value: SKY.horizon },
+    uSunDir:  { value: SKY.sunDir  },
+    uSunCol:  { value: SKY.sunCol  },
+    uSunIntensity: { value: SKY.sunIntensity },
+    uStarAlpha:    { value: SKY.starAlpha    },
+    uMoonAlpha:    { value: SKY.moonAlpha    },
+    uTime:         { value: 0 },
+  },
+  vertexShader:`
+    varying vec3 vDir;
+    void main(){
+      vDir = normalize(position);
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+    }`,
+  fragmentShader:`
+    #ifdef GL_ES
+    precision highp float;
+    #endif
+    varying vec3 vDir;
+    uniform vec3  uZenith;
+    uniform vec3  uHorizon;
+    uniform vec3  uSunDir;
+    uniform vec3  uSunCol;
+    uniform float uSunIntensity;
+    uniform float uStarAlpha;
+    uniform float uMoonAlpha;
+    uniform float uTime;
+
+    float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+    float vn(vec2 p){
+      vec2 i=floor(p),f=fract(p),u=f*f*(3.-2.*f);
+      return mix(mix(hash(i),hash(i+vec2(1,0)),u.x),
+                 mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),u.x),u.y);
+    }
+    float fbm(vec2 p){
+      float v=0.0,a=0.5;
+      v+=a*vn(p);p=p*2.1+vec2(1.7,9.2);a*=0.5;
+      v+=a*vn(p);p=p*2.1+vec2(8.3,2.8);a*=0.5;
+      v+=a*vn(p);p=p*2.1+vec2(3.1,6.4);a*=0.5;
+      v+=a*vn(p);
+      return v/0.9375;
+    }
+
+    /* ── Realistic cloud — isotropic fbm, not banded ── */
+    float cloud(vec2 uv, float scale, float t, float cover){
+      vec2 p = uv * scale;
+      /* domain warp — prevents straight lines */
+      vec2 warp = vec2(fbm(p + vec2(t*0.004, 0.0)),
+                       fbm(p + vec2(0.0, t*0.004)));
+      float n = fbm(p + warp*1.8 + vec2(t*0.003, t*0.002));
+      return smoothstep(cover, cover+0.28, n);
+    }
+
+    /* ── Aurora borealis ── */
+    float aurora(vec2 uv, float t){
+      /* curtain shape — vertical waves rippling across sky */
+      float x = uv.x;
+      float wave1 = sin(x*2.8  + t*0.55 + vn(vec2(x*0.4, t*0.12))*2.0)*0.5+0.5;
+      float wave2 = sin(x*4.1  - t*0.38 + vn(vec2(x*0.6+3.0, t*0.09))*2.5)*0.5+0.5;
+      float wave3 = sin(x*1.6  + t*0.22 + vn(vec2(x*0.3+7.0, t*0.07))*1.8)*0.5+0.5;
+      float curtain = wave1*0.5 + wave2*0.3 + wave3*0.2;
+      /* vertical fade — aurora lives at mid-sky */
+      float vFade = smoothstep(0.0,0.15,uv.y)*smoothstep(1.0,0.35,uv.y);
+      /* flickering intensity */
+      float flicker = 0.8 + 0.2*sin(t*1.8 + uv.x*3.0)*sin(t*0.9+2.1);
+      return curtain * vFade * flicker;
+    }
+
+    void main(){
+      vec3 d = normalize(vDir);
+      float up = max(d.y, 0.0);
+
+      /* sky gradient */
+      vec3 col = mix(uHorizon, uZenith, pow(up, 0.6));
+
+      if(uStarAlpha > 0.3){
+        /* ── NIGHT: stars + aurora borealis ── */
+
+        /* stars — sparser, only bright ones */
+        vec2 suv = d.xz / (abs(d.y)+0.001);
+        float star = 0.0;
+        /* layer 1 — fewer bright stars (threshold raised) */
+        vec2 sg1 = floor(suv*42.0); vec2 sf1 = fract(suv*42.0)-0.5;
+        float sd1 = length(sf1 - hash(sg1)*0.35 + 0.175);
+        star += smoothstep(0.09,0.0,sd1)*pow(hash(sg1+vec2(7.,3.)),3.5)*1.6;
+        /* layer 2 — very sparse faint stars */
+        vec2 sg2 = floor(suv*90.0); vec2 sf2 = fract(suv*90.0)-0.5;
+        float sd2 = length(sf2 - hash(sg2+vec2(1.,2.))*0.3 + 0.15);
+        star += smoothstep(0.06,0.0,sd2)*pow(hash(sg2+vec2(5.,8.)),5.0)*0.7;
+        star *= smoothstep(0.0,0.14,d.y);
+        float twinkle = 0.80+0.20*sin(uTime*2.2+hash(floor(suv*42.0)+vec2(9.,1.))*80.0);
+        col += vec3(0.88,0.93,1.0)*star*twinkle*uStarAlpha;
+
+        /* aurora — only visible in sky, not near horizon */
+        float auroraUp = smoothstep(0.05, 0.20, d.y);
+        if(auroraUp > 0.001){
+          /* sky UV for aurora */
+          vec2 skyUv = vec2(d.x*0.5+0.5, up);
+          float a1 = aurora(skyUv, uTime);
+          float a2 = aurora(skyUv + vec2(0.3, 0.1), uTime*1.2+4.0)*0.6;
+
+          /* aurora colors: green core, purple/pink edges */
+          vec3 auroraGreen  = vec3(0.05, 0.85, 0.45);
+          vec3 auroraTeal   = vec3(0.02, 0.70, 0.65);
+          vec3 auroraPurple = vec3(0.55, 0.10, 0.75);
+          vec3 auroraWhite  = vec3(0.80, 0.95, 0.90);
+
+          vec3 aCol = mix(auroraGreen, auroraTeal, a2);
+          aCol = mix(aCol, auroraPurple, smoothstep(0.6,0.9,a1)*0.4);
+          aCol = mix(aCol, auroraWhite, smoothstep(0.82,0.95,a1)*0.3);
+
+          float aIntensity = (a1 + a2*0.5) * auroraUp * uStarAlpha * 0.45;
+          col = mix(col, col + aCol, clamp(aIntensity, 0.0, 0.55));
+        }
+
+      } else {
+        /* ── DAYTIME/TWILIGHT: realistic clouds (no banding) ── */
+        vec2 cloudUv = d.xz / max(d.y + 0.05, 0.05);
+
+        /* three cloud layers — isotropic fbm, domain warped */
+        float c1 = cloud(cloudUv, 0.12, uTime, 0.48);  /* high cirrus */
+        float c2 = cloud(cloudUv, 0.22, uTime, 0.40);  /* cumulus */
+        float c3 = cloud(cloudUv, 0.38, uTime, 0.55)*0.7; /* low patches */
+
+        float cloudMask = clamp(c1*0.5+c2*0.7+c3*0.4, 0.0, 1.0);
+        cloudMask *= smoothstep(0.0, 0.10, d.y); /* fade at horizon */
+
+        float sunUp = max(uSunDir.y, 0.1);
+        vec3 cloudLight  = vec3(0.95,0.96,0.98);
+        vec3 cloudShadow = vec3(0.58,0.62,0.70);
+        vec3 cloudCol    = mix(cloudShadow, cloudLight, 0.4+sunUp*0.6);
+
+        col = mix(col, cloudCol, cloudMask*0.90);
+      }
+
+      /* sun disc + glow — daytime/twilight only */
+      if(uStarAlpha < 0.3){
+        float sunDot = dot(d, normalize(uSunDir));
+        float disc   = smoothstep(0.9990, 0.9999, sunDot);
+        float corona  = pow(max(sunDot,0.0), 200.0)*0.4;
+        float glow    = pow(max(sunDot,0.0), 8.0)*0.08;
+        col += uSunCol*(disc*2.5 + corona + glow)*uSunIntensity;
+      }
+      /* moon — night only */
+      if(uMoonAlpha > 0.01 && uStarAlpha > 0.3){
+        vec3 moonDir = normalize(vec3(-uSunDir.x,-uSunDir.y*0.8,-uSunDir.z));
+        float moonDot = dot(d,moonDir);
+        col += vec3(0.95,0.97,1.0)*smoothstep(0.9994,0.9999,moonDot)*uMoonAlpha*3.0;
+        col += vec3(0.7,0.8,1.0)*pow(max(moonDot,0.0),60.0)*0.06*uMoonAlpha;
+      }
+
+      gl_FragColor = vec4(col,1.0);
+    }`,
+  side: THREE.BackSide,
+  depthWrite: false,
+});
+const skyMesh = new THREE.Mesh(skyGeo, skyMat);
+skyMesh.renderOrder = -1;
+scene.add(skyMesh);
+
+/* apply sky colors to scene */
+scene.background = SKY.fogC;
+scene.fog = new THREE.FogExp2(SKY.fogC.getHex(), 0.0018);
+
+/* ── camera: angled view, horizon visible, like standing on a boat ── */
+const camera=new THREE.PerspectiveCamera(60, W/H, 0.1, 8000);
+camera.position.set(0, 18, 55);
+camera.lookAt(0, 8, -160);
+
+/* ── lights driven by sky palette ── */
+const sun=new THREE.DirectionalLight(SKY.sunCol.getHex(), SKY.sunIntensity);
+sun.position.copy(SKY.sunDir).multiplyScalar(200);
+scene.add(sun);
+const fill=new THREE.DirectionalLight(SKY.fillCol.getHex(), SKY.fillIntensity);
+fill.position.set(-80,50,60);
+scene.add(fill);
+const pink=new THREE.DirectionalLight(0xff88aa,0.5);
+pink.position.set(-30,60,80);
+scene.add(pink);
+const ambI = SKY.starAlpha>0.3 ? 1.2 : 2.0;
+scene.add(new THREE.AmbientLight(0x0d1f33, ambI));
+
+/* ══════════════════════════════════════════════════
+   VERTEX SHADER
+   
+   Key physics for realistic waves:
+   1. Gerstner waves: vertices move in circular orbit
+      (peak is sharp, trough is flat — like real water)
+   2. Wave cross-section: each crest is NARROW at top,
+      wide rounded trough — not symmetric sine
+   3. Different wave trains cross at angles so the
+      surface is irregular, not repeating grid
+   4. Foam mask: steep + high = breaking crest
+══════════════════════════════════════════════════ */
+const vertSrc=`
+uniform float uTime;
+uniform vec2  uSwimPos;
+uniform vec2  uSwimDir;
+uniform float uSwimSpeed;
+uniform float uSwimActive;
+uniform float uBigWaveZ;
+uniform float uBigWaveAmp;
+uniform float uBigWaveWidth;
+uniform float uBigWaveZ1;
+uniform float uBigWaveAmp1;
+uniform float uBigWaveWidth1;
+uniform float uBigWaveZ2;
+uniform float uBigWaveAmp2;
+uniform float uBigWaveWidth2;
+uniform float uBigWaveZ3;
+uniform float uBigWaveAmp3;
+uniform float uBigWaveWidth3;
+
+varying vec3  vPos;
+varying vec3  vNorm;
+varying float vH;
+varying float vFoam;
+
+/* True Gerstner wave — circular particle orbit
+   Gives sharp crests, flat troughs — realistic shape */
+vec3 gerstner(vec2 p, vec2 dir, float wavelength, float amplitude, float speed, float t, inout vec3 tangent, inout vec3 binormal){
+  float k    = 6.28318 / wavelength;
+  float c    = sqrt(9.81 / k);      /* deep water phase speed */
+  float f    = k * dot(dir, p) - c * speed * t;
+  float Q    = 0.65;                /* steepness 0=sine 1=peak */
+  float QA   = Q * amplitude;
+
+  /* Gerstner horizontal displacement + vertical */
+  vec3 result;
+  result.x = QA * dir.x * cos(f);
+  result.z = QA * dir.y * cos(f);
+  result.y = amplitude * sin(f);
+
+  /* accumulate tangent/binormal for normal */
+  tangent  += vec3(-Q*amplitude*k*dir.x*dir.x*sin(f),
+                    Q*amplitude*k*dir.x*cos(f),
+                   -Q*amplitude*k*dir.x*dir.y*sin(f));
+  binormal += vec3(-Q*amplitude*k*dir.x*dir.y*sin(f),
+                    Q*amplitude*k*dir.y*cos(f),
+                   -Q*amplitude*k*dir.y*dir.y*sin(f));
+  return result;
+}
+
+void main(){
+  vec3 pos      = position;
+  vec3 tangent  = vec3(1.0,0.0,0.0);
+  vec3 binormal = vec3(0.0,0.0,1.0);
+  float t       = uTime;
+
+  /* === WAVE TRAINS ===
+     wavelength in world units, amplitude << wavelength
+     Crossing angles create the irregular ocean surface */
+
+  vec3 w=vec3(0.);
+
+  /* ocean swell — two primary trains at non-round angles */
+  w += gerstner(pos.xz, normalize(vec2(1.0,  0.28)), 42.0, 0.55, 0.80, t, tangent, binormal);
+  w += gerstner(pos.xz, normalize(vec2(-0.73, 1.0)), 35.0, 0.42, 0.72, t, tangent, binormal);
+  /* secondary swell — different period, breaks symmetry */
+  w += gerstner(pos.xz, normalize(vec2(0.55, 0.83)), 27.0, 0.28, 0.95, t, tangent, binormal);
+  w += gerstner(pos.xz, normalize(vec2(-0.88,-0.47)),22.0, 0.22, 1.05, t, tangent, binormal);
+  /* medium chop — 4 crossing directions */
+  w += gerstner(pos.xz, normalize(vec2(0.92,-0.38)), 13.0, 0.18, 1.35, t, tangent, binormal);
+  w += gerstner(pos.xz, normalize(vec2(-0.44, 0.90)),11.0, 0.15, 1.55, t, tangent, binormal);
+  w += gerstner(pos.xz, normalize(vec2(0.27,  0.96)), 9.0, 0.12, 1.75, t, tangent, binormal);
+  w += gerstner(pos.xz, normalize(vec2(-0.65,-0.76)), 8.0, 0.10, 1.95, t, tangent, binormal);
+  /* small chop — irregular */
+  w += gerstner(pos.xz, normalize(vec2(-0.82, 0.57)), 5.5, 0.07, 2.50, t, tangent, binormal);
+  w += gerstner(pos.xz, normalize(vec2(0.71, -0.70)), 4.8, 0.06, 2.80, t, tangent, binormal);
+  w += gerstner(pos.xz, normalize(vec2(0.18,  1.0 )), 4.2, 0.05, 3.10, t, tangent, binormal);
+  /* fine ripple — fast, small, 3 different angles */
+  w += gerstner(pos.xz, normalize(vec2(-0.35, 0.94)), 3.2, 0.03, 3.80, t, tangent, binormal);
+  w += gerstner(pos.xz, normalize(vec2(0.88,  0.47)), 2.8, 0.025,4.20, t, tangent, binormal);
+  w += gerstner(pos.xz, normalize(vec2(-0.62,-0.78)), 2.4, 0.02, 4.80, t, tangent, binormal);
+
+  pos += w;
+
+  /* === BIG ROLLING WAVE travels from background toward viewer ===
+     Asymmetric Stokes profile: steep front face, long gentle back swell.
+     Lateral cosine envelope: full height at centre-X, tapers to zero at sides. */
+/* helper macro as function — apply one big wave */
+  /* wave 0 */
+  if(uBigWaveAmp > 0.001){
+    float dz0=pos.z-uBigWaveZ;
+    float lat0=max(cos(clamp(pos.x/(uBigWaveWidth*0.85),-1.5708,1.5708)),0.);
+    float pf0 = dz0>=0. ? exp(-dz0*dz0*0.014)*(1.-smoothstep(0.,20.,dz0))
+                        : exp(-dz0*dz0*0.0025);
+    pf0=max(pf0,0.);
+    pos.y += uBigWaveAmp*18.0*pf0*lat0;
+    vFoam  = clamp(vFoam+smoothstep(0.55,1.,pf0*lat0)*uBigWaveAmp*0.9,0.,1.);
+  }
+  /* wave 1 */
+  if(uBigWaveAmp1 > 0.001){
+    float dz1=pos.z-uBigWaveZ1;
+    float lat1=max(cos(clamp(pos.x/(uBigWaveWidth1*0.85),-1.5708,1.5708)),0.);
+    float pf1 = dz1>=0. ? exp(-dz1*dz1*0.014)*(1.-smoothstep(0.,20.,dz1))
+                        : exp(-dz1*dz1*0.0025);
+    pf1=max(pf1,0.);
+    pos.y += uBigWaveAmp1*18.0*pf1*lat1;
+    vFoam  = clamp(vFoam+smoothstep(0.55,1.,pf1*lat1)*uBigWaveAmp1*0.9,0.,1.);
+  }
+  /* wave 2 */
+  if(uBigWaveAmp2 > 0.001){
+    float dz2=pos.z-uBigWaveZ2;
+    float lat2=max(cos(clamp(pos.x/(uBigWaveWidth2*0.85),-1.5708,1.5708)),0.);
+    float pf2 = dz2>=0. ? exp(-dz2*dz2*0.014)*(1.-smoothstep(0.,20.,dz2))
+                        : exp(-dz2*dz2*0.0025);
+    pf2=max(pf2,0.);
+    pos.y += uBigWaveAmp2*18.0*pf2*lat2;
+    vFoam  = clamp(vFoam+smoothstep(0.55,1.,pf2*lat2)*uBigWaveAmp2*0.9,0.,1.);
+  }
+  /* wave 3 */
+  if(uBigWaveAmp3 > 0.001){
+    float dz3=pos.z-uBigWaveZ3;
+    float lat3=max(cos(clamp(pos.x/(uBigWaveWidth3*0.85),-1.5708,1.5708)),0.);
+    float pf3 = dz3>=0. ? exp(-dz3*dz3*0.014)*(1.-smoothstep(0.,20.,dz3))
+                        : exp(-dz3*dz3*0.0025);
+    pf3=max(pf3,0.);
+    pos.y += uBigWaveAmp3*18.0*pf3*lat3;
+    vFoam  = clamp(vFoam+smoothstep(0.55,1.,pf3*lat3)*uBigWaveAmp3*0.9,0.,1.);
+  }
+
+  /* foam: steep crests that are breaking */
+  float steep = 1.0 - dot(normalize(cross(binormal, tangent)), vec3(0,1,0));
+  vFoam = smoothstep(0.18, 0.55, steep) * smoothstep(0.3, 1.0, w.y/1.2+0.5);
+
+  /* swimmer */
+  if(uSwimActive > 0.01){
+    vec2 fw=length(uSwimDir)>.001?normalize(uSwimDir):vec2(1,0);
+    vec2 sd=vec2(-fw.y,fw.x);
+    vec2 tp=pos.xz-uSwimPos;
+    float pF=dot(tp,fw),pS=dot(tp,sd);
+    float bL=5.0,bW=1.2;
+    float hu=(pF+bL*.18)*(pF+bL*.18)/(bL*bL)+pS*pS/(bW*bW);
+    pos.y+=exp(-hu*1.3)*uSwimActive*0.70;
+    /* bow wave — smooth ahead-only mask, no hard edge */
+    float bd=length(tp-fw*bL*0.5);
+    float bowMask=smoothstep(0.8,-0.8,pF/bL);  /* smooth 1 ahead, 0 behind */
+    pos.y+=sin(bd*0.45-t*4.5)*exp(-bd*0.10)*exp(-abs(pS)*0.4)
+          *bowMask*uSwimActive*0.50*uSwimSpeed;
+    /* wake — smooth behind-only mask */
+    float wd=-pF;
+    float wakeMask=smoothstep(-0.5,1.5,pF/bL); /* smooth 0 ahead, 1 behind */
+    pos.y-=(sin(wd*0.28-t*2.4)*exp(-max(wd,0.0)*0.04)
+           +0.4*sin(wd*0.14-t*1.3)*exp(-max(wd,0.0)*0.028))
+          *exp(-pS*pS*0.20)*wakeMask*uSwimActive*0.32;
+  }
+
+  vH   = pos.y;
+  vPos = pos;
+  vNorm= normalize(cross(binormal, tangent));
+
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(pos,1.0);
+}`;
+
+const fragSrc=`
+#ifdef GL_ES
+precision highp float;
+#endif
+
+uniform float uTime;
+uniform vec3  uCamPos;
+uniform vec3  uSunDir;
+uniform vec3  uFillDir;
+uniform vec3  uPinkDir;
+
+varying vec3  vPos;
+varying vec3  vNorm;
+varying float vH;
+varying float vFoam;
+
+float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+float vn(vec2 p){
+  vec2 i=floor(p),f=fract(p),u=f*f*(3.-2.*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),u.x),
+             mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),u.x),u.y);
+}
+
+
+
+float ggx(float NdH, float r){
+  float a=r*r,a2=a*a,d=NdH*NdH*(a2-1.)+1.;
+  return a2/(3.14159*d*d+0.0001);
+}
+float schlick(float NdV, float F0){return F0+(1.-F0)*pow(1.-NdV,5.);}
+
+void main(){
+  vec3 N  =normalize(vNorm);
+  vec3 V  =normalize(uCamPos-vPos);
+  float NdV=max(dot(N,V),0.001);
+
+  float H01=clamp(vH/2.0+0.5,0.0,1.0);
+
+  /* dark ocean base */
+  vec3 deepC =vec3(0.008,0.032,0.068);
+  vec3 midC  =vec3(0.018,0.085,0.148);
+  vec3 crestC=vec3(0.030,0.165,0.228);
+  vec3 wCol  =mix(deepC, midC,  smoothstep(0.20,0.55,H01));
+  wCol       =mix(wCol,  crestC,smoothstep(0.55,0.85,H01));
+  wCol      +=vec3(0.0,0.08,0.12)*pow(max(H01-0.65,0.0)/0.35,1.5)*0.40;
+
+  vec2 xz=vPos.xz;
+
+
+
+  /* Fresnel */
+  float F=schlick(NdV,0.020);
+  vec3 skyHorizon=vec3(0.05,0.10,0.20);
+  vec3 col=mix(wCol,skyHorizon,min(F*0.70+0.05,1.0));
+
+  /* sun — sharp bright glints */
+  vec3 Hs=normalize(uSunDir+V);
+  float NdLs=max(dot(N,uSunDir),0.0);
+  col+=vec3(1.0,0.96,0.88)*ggx(max(dot(N,Hs),0.),0.060)*NdLs*12.0;
+  col+=vec3(1.0)*ggx(max(dot(N,Hs),0.),0.018)*NdLs*25.0;
+
+  /* fill — teal */
+  vec3 Hf=normalize(uFillDir+V);
+  col+=vec3(0.50,0.88,1.00)*ggx(max(dot(N,Hf),0.),0.20)*max(dot(N,uFillDir),0.)*3.0;
+
+  /* pink accent */
+  vec3 Hp=normalize(uPinkDir+V);
+  col+=vec3(1.0,0.50,0.65)*ggx(max(dot(N,Hp),0.),0.14)*max(dot(N,uPinkDir),0.)*2.2;
+
+  /* foam */
+  float foamN=vn(xz*0.45+vec2(uTime*.20,-uTime*.16))
+             *vn(xz*0.90+vec2(-uTime*.24,uTime*.19));
+  float foamFine=vn(xz*2.5+vec2(uTime*.40,-uTime*.32));
+  float foamMask=clamp(
+    vFoam*smoothstep(0.18,0.52,foamN)
+   +vFoam*0.35*smoothstep(0.60,0.82,foamFine),
+  0.,1.);
+  vec3 foamCol=vec3(0.88,0.95,1.00);
+  col=mix(col,foamCol,foamMask*0.90);
+  col+=foamCol*foamMask*ggx(max(dot(N,Hs),0.),0.06)*NdLs*3.0;
+
+  /* sparkle */
+  float sp=vn(xz*2.8+vec2(uTime,uTime*.7))*vn(xz*4.5+vec2(-uTime*.8,uTime*.9));
+  col+=vec3(1.0)*pow(max(sp-0.68,0.0)/0.32,2.5)*5.0*(1.-foamMask*.8);
+
+  /* tone */
+  col=col/(col+0.60);
+  col=pow(max(col,0.),vec3(0.88));
+  float lum=dot(col,vec3(0.2,0.7,0.1));
+  col+=vec3(-0.008,0.004,0.020)*(1.-smoothstep(0.12,0.52,lum));
+
+  gl_FragColor=vec4(col,1.);
+}`;
+
+const uni={
+  uTime:      {value:0},
+  uSwimPos:   {value:new THREE.Vector2(0,0)},
+  uSwimDir:   {value:new THREE.Vector2(1,0)},
+  uSwimSpeed: {value:0},
+  uSwimActive:{value:0},
+  uCamPos:    {value:camera.position.clone()},
+  uSunDir:    {value:SKY.sunDir.clone()},
+  uFillDir:   {value:new THREE.Vector3(-80,50,60).normalize()},
+  uPinkDir:   {value:new THREE.Vector3(-30,60,80).normalize()},
+  uBigWaveZ:     {value: -500.0},
+  uBigWaveAmp:   {value: 0.0},
+  uBigWaveWidth: {value: 220.0},
+  uBigWaveZ1:    {value: -500.0},
+  uBigWaveAmp1:  {value: 0.0},
+  uBigWaveWidth1:{value: 220.0},
+  uBigWaveZ2:    {value: -500.0},
+  uBigWaveAmp2:  {value: 0.0},
+  uBigWaveWidth2:{value: 220.0},
+  uBigWaveZ3:    {value: -500.0},
+  uBigWaveAmp3:  {value: 0.0},
+  uBigWaveWidth3:{value: 220.0},
+};
+
+const mat=new THREE.ShaderMaterial({uniforms:uni,vertexShader:vertSrc,fragmentShader:fragSrc});
+const geo=new THREE.PlaneGeometry(800,800,380,380);
+geo.rotateX(-Math.PI/2);
+scene.add(new THREE.Mesh(geo,mat));
+
+/* ══════════════════════════════════════════════════════
+   MOUNTAIN RANGE — procedural geometry behind the ocean
+   Two layers: far distant range (hazy/atmospheric) +
+   closer mid range (darker, more detail)
+   Built from a subdivided plane with height noise.
+══════════════════════════════════════════════════════ */
+
+
+/* ═══════════════════════════════════════════════════
+   REALISTIC MOUNTAIN RANGE — Moraine Lake / Banff style
+   Sharp angular peaks, steep faces, snow in gullies,
+   multiple distinct peaks at varied heights.
+═══════════════════════════════════════════════════ */
+
+/* ── 2D overlay canvas ── */
+const bCv  = document.getElementById('bubble-canvas');
+const bCtx = bCv.getContext('2d');
+bCv.width  = window.innerWidth;
+bCv.height = window.innerHeight;
+window.addEventListener('resize', () => { bCv.width=window.innerWidth; bCv.height=window.innerHeight; });
+
+/* ── mouse / swimmer ── */
+let swimX=0,swimZ=0,bX=0,bZ=0;
+let swimDX=1,swimDZ=0,swimSpd=0,swimActive=0,swimTimer=0;
+const ray=new THREE.Raycaster(),mPt=new THREE.Vector2();
+const wPlane=new THREE.Plane(new THREE.Vector3(0,1,0),0),wPt=new THREE.Vector3();
+document.addEventListener('mousemove',e=>{
+  mPt.set((e.clientX/window.innerWidth)*2-1,-(e.clientY/window.innerHeight)*2+1);
+  ray.setFromCamera(mPt,camera);
+  if(!ray.ray.intersectPlane(wPlane,wPt))return;
+  const dx=wPt.x-swimX,dz=wPt.z-swimZ,s=Math.sqrt(dx*dx+dz*dz);
+  if(s>0.05){swimDX=dx/s;swimDZ=dz/s;}
+  swimSpd=Math.min(s/5,1);swimX=wPt.x;swimZ=wPt.z;swimActive=1;swimTimer=180;
+});
+
+/* ── cursor ── */
+let cursorX=window.innerWidth/2,cursorY=window.innerHeight/2;
+let cursorActive=false,cursorTimer=0;
+document.addEventListener('mousemove',e=>{cursorX=e.clientX;cursorY=e.clientY;cursorActive=true;cursorTimer=160;});
+function drawCursor(t){
+  if(!cursorActive)return;
+  const p1=Math.sin(t*2.8)*0.12+1.0,p2=Math.sin(t*2.8+Math.PI*.66)*0.12+1.0,p3=Math.sin(t*2.8+Math.PI*1.32)*0.12+1.0;
+  const fade=Math.min(1,cursorTimer/60);
+  bCtx.save();
+  bCtx.beginPath();bCtx.arc(cursorX,cursorY,38*p1,0,Math.PI*2);
+  bCtx.strokeStyle=`rgba(120,210,240,${0.28*fade})`;bCtx.lineWidth=1.0;bCtx.stroke();
+  bCtx.beginPath();bCtx.arc(cursorX,cursorY,22*p2,0,Math.PI*2);
+  bCtx.strokeStyle=`rgba(160,230,255,${0.45*fade})`;bCtx.lineWidth=1.2;bCtx.stroke();
+  bCtx.beginPath();bCtx.arc(cursorX,cursorY,10*p3,0,Math.PI*2);
+  bCtx.strokeStyle=`rgba(220,248,255,${0.65*fade})`;bCtx.lineWidth=1.4;bCtx.stroke();
+  bCtx.beginPath();bCtx.arc(cursorX,cursorY,2.2,0,Math.PI*2);
+  bCtx.fillStyle=`rgba(255,255,255,${0.90*fade})`;bCtx.fill();
+  bCtx.restore();
+}
+
+/* ── bubbles ── */
+class Bubble{
+  constructor(x,y,r,delay){
+    this.x=x+(Math.random()-.5)*55;this.y=y+(Math.random()-.5)*18;
+    this.r=r||(Math.random()*8+2.5);this.vy=-(Math.random()*.5+.18);
+    this.vx=(Math.random()-.5)*.28;this.age=-(delay||0);
+    this.maxAge=Math.random()*100+110;this.wp=Math.random()*Math.PI*2;
+    this.wf=Math.random()*.022+.007;this.wa=Math.random()*1.1+.35;
+    this.er=Math.random()*.007+.002;
+    const t=[[175,238,232],[200,228,255],[235,248,255],[145,210,225]];
+    this.tint=t[Math.floor(Math.random()*t.length)];
+  }
+  get alive(){return this.age<this.maxAge&&this.y>-60;}
+  get alpha(){
+    if(this.age<0)return 0;
+    return Math.min(1,this.age/22)*Math.max(0,1-(this.age-this.maxAge*.78)/(this.maxAge*.22));
+  }
+  update(){
+    this.age++;if(this.age<0)return;
+    this.wp+=this.wf;this.x+=this.vx+Math.sin(this.wp)*this.wa;
+    this.y+=this.vy;this.vy=Math.max(this.vy-.009,-2.1);this.r+=this.er;
+  }
+  draw(){
+    const a=this.alpha;if(a<.01)return;
+    const[tr,tg,tb]=this.tint;
+    bCtx.save();
+    const g=bCtx.createRadialGradient(this.x,this.y,0,this.x,this.y,this.r*3);
+    g.addColorStop(0,`rgba(${tr},${tg},${tb},${.06*a})`);
+    g.addColorStop(.6,`rgba(${tr},${tg},${tb},${.02*a})`);
+    g.addColorStop(1,`rgba(${tr},${tg},${tb},0)`);
+    bCtx.fillStyle=g;bCtx.beginPath();bCtx.arc(this.x,this.y,this.r*3,0,Math.PI*2);bCtx.fill();
+    bCtx.strokeStyle=`rgba(${tr},${tg},${tb},${.65*a})`;
+    bCtx.lineWidth=.8;bCtx.beginPath();bCtx.arc(this.x,this.y,this.r,0,Math.PI*2);bCtx.stroke();
+    bCtx.fillStyle=`rgba(255,255,255,${.82*a})`;
+    bCtx.beginPath();bCtx.arc(this.x-this.r*.26,this.y-this.r*.27,this.r*.13,0,Math.PI*2);bCtx.fill();
+    bCtx.restore();
+  }
+}
+const bubbles=[];
+let lastBreath=-99;
+function projectToScreen(wx,wz){
+  const v=new THREE.Vector3(wx,0,wz).project(camera);
+  return{x:(v.x*.5+.5)*window.innerWidth,y:(-.5*v.y+.5)*window.innerHeight};
+}
+function spawnBubbles(t){
+  if(swimActive<.06||t-lastBreath<2.8)return;lastBreath=t;
+  const p=projectToScreen(bX,bZ);
+  for(let i=0;i<Math.floor(Math.random()*6)+4;i++)
+    bubbles.push(new Bubble(p.x,p.y,Math.random()*8+2.5,i*8));
+}
+function spawnTurbulence(t){
+  if(Math.random()>.012||swimActive<.18)return;
+  const p=projectToScreen(bX,bZ);
+  bubbles.push(new Bubble(p.x+(Math.random()-.5)*80,p.y+(Math.random()-.5)*28,Math.random()*4+1.2,0));
+}
+
+/* ── big wave ── */
+const BW_START=-280,BW_SPLASH=58,BW_END=140,BW_SPEED=11,BW_PAUSE=2;
+let bwZ=BW_START,bwPhase='traveling',bwPauseTimer=0,bwSplashFired=false;
+function bwGetAmp(z){const t2=Math.max(0,Math.min(1,(z-BW_START)/(BW_SPLASH-BW_START)));return t2*t2*t2;}
+function updateBigWave(t){
+  if(bwPhase==='paused'){
+    bwPauseTimer-=1/60;
+    if(bwPauseTimer<=0){bwPhase='traveling';bwZ=BW_START;bwSplashFired=false;}
+    uni.uBigWaveAmp.value=0;return;
+  }
+  bwZ+=BW_SPEED/60;
+  uni.uBigWaveZ.value=bwZ;uni.uBigWaveAmp.value=bwGetAmp(bwZ);
+  uni.uBigWaveWidth.value=210;
+  uni.uBigWaveAmp1.value=uni.uBigWaveAmp2.value=uni.uBigWaveAmp3.value=0;
+  if(!bwSplashFired&&bwZ>=BW_SPLASH)bwSplashFired=true;
+  if(bwZ>=BW_END){bwPhase='paused';bwPauseTimer=BW_PAUSE;uni.uBigWaveAmp.value=0;}
+}
+
+/* ── mountains ── */
+let _mtnCache=null;
+window.addEventListener('resize',()=>{_mtnCache=null;});
+function getHorizonY(){
+  const p=new THREE.Vector3(0,0,-300);p.project(camera);
+  return(-p.y*.5+.5)*bCv.height;
+}
+function buildProfile(peaks,W){
+  const p=new Float32Array(W);
+  for(let x=0;x<W;x++){
+    const tx=x/W;let h=0;
+    for(const pk of peaks){const dx=Math.abs(tx-pk.cx);if(dx<pk.w){const t=1-dx/pk.w;h=Math.max(h,pk.h*t*t*(3-2*t));}}
+    p[x]=h;
+  }
+  const s=new Float32Array(W);
+  for(let x=0;x<W;x++){let sum=0,cnt=0;for(let d=-3;d<=3;d++){const i=Math.max(0,Math.min(W-1,x+d));sum+=p[i];cnt++;}s[x]=sum/cnt;}
+  for(let x=0;x<W;x++){if(s[x]>0.04){const tx=x/W;const j=Math.sin(tx*W*0.22+1.4)*0.016+Math.sin(tx*W*0.51+3.7)*0.010+Math.sin(tx*W*0.93+0.8)*0.006;s[x]=Math.max(0,s[x]+j*s[x]);}}
+  return s;
+}
+function paintLayer(profile,peakH,hy,opts){
+  const{litR,shadR,litS,shadS,snowLine,fog,sky}=opts;
+  const W=bCv.width;
+  const fb=(c,f)=>c.map((v,i)=>Math.round(v*(1-f)+sky[i]*f));
+  const mid=[0,1,2].map(i=>Math.round((litR[i]*.45+shadR[i]*.55)));
+  const base=fb(mid,fog),lit=fb(litR,fog*.4),ls=fb(litS,fog*.25),ss=fb(shadS,fog*.25);
+  bCtx.save();
+  bCtx.beginPath();bCtx.moveTo(0,hy+2);
+  for(let x=0;x<W;x++)bCtx.lineTo(x,hy-profile[x]*peakH);
+  bCtx.lineTo(W,hy+2);bCtx.closePath();bCtx.clip();
+  const g=bCtx.createLinearGradient(0,hy-peakH,0,hy);
+  g.addColorStop(0,`rgba(${base[0]+12},${base[1]+12},${base[2]+16},${.97-fog*.1})`);
+  g.addColorStop(.5,`rgba(${base[0]},${base[1]},${base[2]},${.97-fog*.08})`);
+  g.addColorStop(1,`rgba(${base[0]},${base[1]},${base[2]},0)`);
+  bCtx.fillStyle=g;bCtx.fillRect(0,hy-peakH-2,W,peakH+4);
+  const diagW=W*.45;
+  const diagG=bCtx.createLinearGradient(0,hy-peakH,diagW,hy);
+  diagG.addColorStop(0,`rgba(${lit[0]},${lit[1]},${lit[2]},${.50*(1-fog)})`);
+  diagG.addColorStop(.5,`rgba(${lit[0]},${lit[1]},${lit[2]},${.18*(1-fog)})`);
+  diagG.addColorStop(1,`rgba(${lit[0]},${lit[1]},${lit[2]},0)`);
+  bCtx.fillStyle=diagG;bCtx.fillRect(0,hy-peakH-2,diagW,peakH+4);
+  const SNOW_THRESH=snowLine*.97;
+  const segs=[];let seg=null;
+  for(let x=0;x<W;x++){
+    if(profile[x]>SNOW_THRESH){if(!seg)seg={s:x};seg.e=x;}
+    else if(seg){segs.push(seg);seg=null;}
+  }
+  if(seg)segs.push(seg);
+  const snowG=bCtx.createLinearGradient(0,0,W,0);
+  snowG.addColorStop(0,`rgba(${ls[0]},${ls[1]},${ls[2]},${.95*(1-fog*.2)})`);
+  snowG.addColorStop(.48,`rgba(${ls[0]},${ls[1]},${ls[2]},${.92*(1-fog*.15)})`);
+  snowG.addColorStop(.52,`rgba(${ss[0]},${ss[1]},${ss[2]},${.82*(1-fog*.15)})`);
+  snowG.addColorStop(1,`rgba(${ss[0]},${ss[1]},${ss[2]},${.78*(1-fog*.2)})`);
+  for(const{s,e}of segs){
+    bCtx.beginPath();
+    for(let x=s;x<=e;x++){x===s?bCtx.moveTo(x,hy-profile[x]*peakH):bCtx.lineTo(x,hy-profile[x]*peakH);}
+    for(let x=e;x>=s;x--)bCtx.lineTo(x,hy-Math.pow(profile[x],.4)*peakH*snowLine);
+    bCtx.closePath();bCtx.fillStyle=snowG;bCtx.fill();
+  }
+  bCtx.restore();
+}
+function drawMountains(){
+  const hy=Math.max(bCv.height*.15,Math.min(bCv.height*.62,getHorizonY()));
+  const W=bCv.width,H=bCv.height;
+  const n=hour<5||hour>=22,ss2=hour>=17&&hour<21,sr2=hour>=5&&hour<8;
+  const sky=n?[10,15,35]:ss2?[60,38,32]:sr2?[80,52,42]:[108,142,175];
+  const C=n?{litR:[128,138,168],shadR:[72,80,108],litS:[205,215,235],shadS:[155,165,190]}
+           :ss2?{litR:[175,108,72],shadR:[52,35,55],litS:[248,222,195],shadS:[175,158,192]}
+           :sr2?{litR:[162,115,78],shadR:[48,40,60],litS:[245,228,205],shadS:[180,168,192]}
+           :{litR:[140,135,128],shadR:[52,58,74],litS:[238,242,250],shadS:[185,195,218]};
+  if(!_mtnCache){
+    _mtnCache={
+      far: buildProfile([{cx:.12,h:.70,w:.26},{cx:.38,h:.86,w:.30},{cx:.63,h:.74,w:.27},{cx:.87,h:.80,w:.24}],W),
+      mid: buildProfile([{cx:.07,h:.66,w:.24},{cx:.32,h:.92,w:.32},{cx:.58,h:.80,w:.28},{cx:.82,h:.88,w:.29}],W),
+      near:buildProfile([{cx:.15,h:.73,w:.26},{cx:.43,h:1.0,w:.36},{cx:.70,h:.84,w:.30},{cx:.93,h:.69,w:.22}],W),
+    };
+  }
+  paintLayer(_mtnCache.far, H*.095,hy,{...C,snowLine:.90,fog:.55,sky});
+  paintLayer(_mtnCache.mid, H*.165,hy,{...C,snowLine:.86,fog:.18,sky});
+  paintLayer(_mtnCache.near,H*.235,hy,{...C,snowLine:.82,fog:.02,sky});
+  /* tree line */
+  bCtx.save();bCtx.beginPath();bCtx.moveTo(0,hy+1);
+  const tc=n?[14,20,35]:ss2?[22,15,20]:sr2?[20,22,18]:[18,28,20];
+  for(let x=0;x<W;x++){
+    const tx=x/W;
+    const base=Math.abs(Math.sin(tx*W*.07+1.1))*.45+Math.abs(Math.sin(tx*W*.17+3.4))*.30+Math.abs(Math.sin(tx*W*.38+.7))*.15;
+    const treeH=H*(.010+base*.035);
+    const inTree=(Math.sin(tx*W*.14+2.1)*.5+.5)>.25;
+    bCtx.lineTo(x,hy-(inTree?treeH:H*.005));
+  }
+  bCtx.lineTo(W,hy+1);bCtx.closePath();
+  const tg=bCtx.createLinearGradient(0,hy-H*.05,0,hy);
+  tg.addColorStop(0,`rgba(${tc[0]},${tc[1]},${tc[2]},.96)`);
+  tg.addColorStop(1,`rgba(${tc[0]},${tc[1]},${tc[2]},.30)`);
+  bCtx.fillStyle=tg;bCtx.fill();bCtx.restore();
+}
+
+function drawDrops() {
+  /* splashes removed */
+}
+
+
+const clock = new THREE.Clock();
+
+/* ── main render loop ── */
+function animate(){
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+
+  /* swimmer fade */
+  if(swimTimer>0){swimTimer--;swimActive=Math.min(1,swimTimer/80);}else swimActive=0;
+  swimSpd*=.90;
+  bX+=(swimX-bX)*.062; bZ+=(swimZ-bZ)*.062;
+
+  /* update uniforms */
+  uni.uTime.value=t;
+  skyMat.uniforms.uTime.value=t;
+  updateBigWave(t);
+  uni.uSwimPos.value.set(bX,bZ);
+  uni.uSwimDir.value.set(swimDX,swimDZ);
+  uni.uSwimSpeed.value=swimSpd;
+  uni.uSwimActive.value=swimActive;
+  uni.uCamPos.value.copy(camera.position);
+
+  /* 2D canvas */
+  bCtx.clearRect(0,0,bCv.width,bCv.height);
+  drawMountains();
+  drawDrops();
+  if(cursorTimer>0) cursorTimer--;
+  else cursorActive=false;
+  drawCursor(t);
+  spawnBubbles(t);
+  spawnTurbulence(t);
+  for(let i=bubbles.length-1;i>=0;i--){
+    bubbles[i].update();bubbles[i].draw();
+    if(!bubbles[i].alive)bubbles.splice(i,1);
+  }
+
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
